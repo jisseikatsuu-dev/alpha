@@ -245,5 +245,90 @@ app.post('/api/samsara/sync', async (req, res) => {
   }
 });
 
+// ================== CONTROL DE PATIO ==================
+
+// GET /api/patio -> vehículos activos (sin salida) + historial reciente (con salida)
+app.get('/api/patio', async (req, res) => {
+  try {
+    const activos = (
+      await pool.query(
+        `SELECT * FROM patio_registros WHERE salida_en IS NULL ORDER BY entrada_en ASC`
+      )
+    ).rows;
+
+    const historial = (
+      await pool.query(
+        `SELECT * FROM patio_registros WHERE salida_en IS NOT NULL ORDER BY entrada_en DESC LIMIT 200`
+      )
+    ).rows;
+
+    res.json({ activos, historial });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/patio -> registrar entrada
+// body: { placa, conductor, empresa, anden?, tipo: 'carga'|'descarga', notas? }
+app.post('/api/patio', async (req, res) => {
+  try {
+    const { conductor, empresa, anden, tipo, notas } = req.body || {};
+    const placa = (req.body?.placa || '').trim().toUpperCase();
+
+    if (!placa || !conductor?.trim() || !empresa?.trim() || !['carga', 'descarga'].includes(tipo)) {
+      return res.status(400).json({ error: 'Faltan campos o son inválidos (placa, conductor, empresa, tipo).' });
+    }
+
+    const activo = await pool.query(
+      `SELECT id FROM patio_registros WHERE placa = $1 AND salida_en IS NULL`,
+      [placa]
+    );
+    if (activo.rows.length > 0) {
+      return res.status(409).json({ error: `La placa ${placa} ya tiene una entrada abierta en el patio.` });
+    }
+
+    const insertado = await pool.query(
+      `INSERT INTO patio_registros (placa, conductor, empresa, anden, tipo, notas)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [placa, conductor.trim(), empresa.trim(), anden || null, tipo, notas?.trim() || null]
+    );
+
+    res.json(insertado.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// POST /api/patio/:id/salida -> registrar salida
+app.post('/api/patio/:id/salida', async (req, res) => {
+  try {
+    const actualizado = await pool.query(
+      `UPDATE patio_registros SET salida_en = now()
+       WHERE id = $1 AND salida_en IS NULL RETURNING *`,
+      [req.params.id]
+    );
+    if (actualizado.rows.length === 0) {
+      return res.status(404).json({ error: 'Registro no encontrado o ya tiene salida registrada.' });
+    }
+    res.json(actualizado.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/patio/:id -> corregir un registro capturado por error
+app.delete('/api/patio/:id', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM patio_registros WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`Dashboard de rutas corriendo en puerto ${PORT}`));
