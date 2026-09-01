@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Rutas - Llegada / Inicio</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Rutas del turno</h1>
+    <div class="controles">
+      <label>Fecha:
+        <input type="date" id="fecha-input" />
+      </label>
+      <button id="btn-sync">Sincronizar vehículos Samsara</button>
+      <span id="sync-status"></span>
+      <button id="btn-logout" title="Cerrar sesión">Cerrar sesión</button>
+    </div>
+  </header>
+
+  <nav id="tabs"></nav>
+  <main id="contenido"></main>
+
+  <script src="app.js"></script>
+</body>
+</html>
