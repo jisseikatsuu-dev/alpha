@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Captura · Control de viajes</title>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="wrap wide">
+  <header class="top">
+    <div>
+      <span class="eyebrow">Captura de datos</span>
+      <h1>Registro de viajes</h1>
+    </div>
+    <div class="date-block">
+      <strong id="fechaLarga">—</strong>
+      <div class="controls">
+        <input type="date" id="fecha" aria-label="Fecha">
+        <a class="btn" id="linkDash" href="/dashboard">Ver dashboard</a>
+        <form method="post" action="/logout"><button type="submit">Salir</button></form>
+      </div>
+    </div>
+  </header>
+
+  <div class="toolbar">
+    <button id="btnAgregar">+ Agregar fila</button>
+    <button id="btnPegar">Pegar desde Excel</button>
+    <span class="spacer"></span>
+    <span class="estado" id="estado"></span>
+    <button class="primary" id="btnGuardar">Guardar cambios</button>
+  </div>
+  <p class="hint">Copia celdas en Excel o Sheets y pégalas (Ctrl+V) sobre cualquier celda: se reparten por la tabla a partir de ahí. Enter baja a la siguiente fila. Horas en formato HH:MM (también acepta 6:05 pm).</p>
+
+  <div class="section">
+    <div class="tabla-wrap">
+      <table id="grid"><thead></thead><tbody></tbody></table>
+    </div>
+  </div>
+</div>
+
+<dialog id="dlg">
+  <h3>Pegar desde Excel</h3>
+  <p>Pega el rango completo. Si la primera fila trae encabezados (Cliente, Ruta, Unidad, Encendido real…) las columnas se acomodan por nombre; si no, se usa el orden de la tabla.</p>
+  <textarea id="txtPegar" spellcheck="false"></textarea>
+  <div class="acciones">
+    <button id="dlgCancelar">Cancelar</button>
+    <button class="primary" id="dlgAplicar">Agregar a la tabla</button>
+  </div>
+</dialog>
+
+<datalist id="clientes"><option value="Linamar"><option value="Modine"><option value="Wiegand"></datalist>
+<datalist id="turnos"><option value="1"><option value="2"><option value="3"></datalist>
+
+<script>
+const COLS = [
+  { k: 'cliente', label: 'Cliente', list: 'clientes' },
+  { k: 'turno', label: 'Turno', list: 'turnos' },
+  { k: 'ruta', label: 'Ruta' },
+  { k: 'unidad_asignada', label: 'Unidad' },
+  { k: 'operador', label: 'Operador' },
+  { k: 'inicio_ruta', label: 'Inicio prog.', t: 'hora' },
+  { k: 'hora_encendido_real', label: 'Encendido real', t: 'hora' },
+  { k: 'llegada_programada', label: 'Llegada prog.', t: 'hora' },
+  { k: 'hora_llegada_real', label: 'Llegada real', t: 'hora' },
+  { k: 'pasajeros', label: 'Pax', t: 'num' },
+  { k: 'capacidad', label: 'Cap.', t: 'num' },
+  { k: 'notas', label: 'Notas' },
+];
+const ALIAS = {
+  cliente: ['cliente', 'carrier', 'empresa', 'planta'],
+  turno: ['turno', 'shift'],
+  ruta: ['ruta', 'route'],
+  unidad_asignada: ['unidad', 'unidad asignada', 'unidad_asignada', 'camion', 'bus', 'economico'],
+  operador: ['operador', 'chofer', 'conductor'],
+  inicio_ruta: ['inicio', 'inicio prog', 'inicio prog.', 'inicio ruta', 'inicio_ruta', 'salida programada', 'salida prog'],
+  hora_encendido_real: ['encendido', 'encendido real', 'hora encendido', 'hora_encendido_real', 'salida real'],
+  llegada_programada: ['llegada prog', 'llegada prog.', 'llegada programada', 'llegada_programada'],
+  hora_llegada_real: ['llegada real', 'hora llegada', 'hora_llegada_real', 'llegada'],
+  pasajeros: ['pax', 'pasajeros'],
+  capacidad: ['cap', 'cap.', 'capacidad'],
+  notas: ['notas', 'observaciones', 'comentarios'],
+};
+const ETIQ = { a_tiempo: 'A tiempo', retraso: 'Retraso', critico: 'Crítico', en_ruta: 'En ruta', pendiente: 'Pendiente' };
+
+let filas = [];            // { id, d:{...}, estado:'ok'|'nuevo'|'sucio'|'error', err }
+let config = { tolerancia: 5, critico: 15 };
+const $ = (s) => document.querySelector(s);
+const tbody = $('#grid tbody');
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const sinAcentos = (s) => String(s).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+
+function hoyLocal() { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); }
+function normHora(v) {
+  const m = String(v).trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*([ap])?\.?\s*m?\.?$/i);
+  if (!m) return v.trim();
+  let h = +m[1]; const mi = +m[2]; const ap = m[3] && m[3].toLowerCase();
+  if (ap === 'p' && h < 12) h += 12; if (ap === 'a' && h === 12) h = 0;
+  if (h > 23 || mi > 59) return v.trim();
+  return String(h).padStart(2, '0') + ':' + String(mi).padStart(2, '0');
+}
+function difMin(a, b) {
+  if (!/^\d{2}:\d{2}$/.test(a || '') || !/^\d{2}:\d{2}$/.test(b || '')) return null;
+  const m = (t) => +t.slice(0, 2) * 60 + +t.slice(3, 5);
+  let d = m(a) - m(b); if (d < -720) d += 1440; if (d > 720) d -= 1440; return d;
+}
+function estatus(d) {
+  if (d.hora_llegada_real) { const r = difMin(d.hora_llegada_real, d.llegada_programada) ?? 0;
+    return r > config.critico ? 'critico' : r > config.tolerancia ? 'retraso' : 'a_tiempo'; }
+  return d.hora_encendido_real ? 'en_ruta' : 'pendiente';
+}
+const vacia = (f) => COLS.every((c) => !String(f.d[c.k] ?? '').trim());
+const nuevaFila = () => ({ id: null, d: {}, estado: 'nuevo', err: '' });
+const pendientes = () => filas.some((f) => (f.estado === 'nuevo' && !vacia(f)) || f.estado === 'sucio' || f.estado === 'error');
+
+function setEstado(msg, tipo = '') { const e = $('#estado'); e.textContent = msg; e.className = 'estado ' + tipo; }
+
+function renderHead() {
+  $('#grid thead').innerHTML = '<tr><th></th>' + COLS.map((c) => `<th>${c.label}</th>`).join('') + '<th>Retraso</th><th>Estatus</th><th></th></tr>';
+}
+function celdasCalc(f) {
+  const r = difMin(f.d.hora_llegada_real, f.d.llegada_programada);
+  const e = vacia(f) ? null : estatus(f.d);
+  return [r == null ? '—' : `<span class="${r > config.tolerancia ? 'tarde' : r < 0 ? 'temprano' : ''}">${r > 0 ? '+' : ''}${r}</span>`,
+          e ? `<span class="pill ${e}">${ETIQ[e]}</span>` : ''];
+}
+function render() {
+  tbody.innerHTML = filas.map((f, r) => {
+    const [ret, est] = celdasCalc(f);
+    return `<tr class="${f.estado}" data-r="${r}"><td class="st"></td>` +
+      COLS.map((c, ci) => `<td><input data-r="${r}" data-c="${ci}" class="${c.t || ''}" value="${esc(f.d[c.k])}"
+        ${c.list ? `list="${c.list}"` : ''} ${c.t === 'hora' ? 'placeholder="HH:MM" inputmode="numeric"' : ''} ${c.t === 'num' ? 'inputmode="numeric"' : ''}
+        aria-label="${c.label} fila ${r + 1}"></td>`).join('') +
+      `<td class="calc mono">${ret}</td><td class="calc">${est}</td>` +
+      `<td class="acc"><button class="icon" data-del="${r}" title="Eliminar fila" aria-label="Eliminar fila ${r + 1}">✕</button></td></tr>` +
+      (f.err ? `<tr class="error"><td class="st"></td><td colspan="${COLS.length + 3}"><div class="err-msg">${esc(f.err)}</div></td></tr>` : '');
+  }).join('');
+}
+function refrescarFila(r) {
+  const f = filas[r]; const tr = tbody.querySelector(`tr[data-r="${r}"]`); if (!tr) return;
+  tr.className = f.estado; const [ret, est] = celdasCalc(f); const calc = tr.querySelectorAll('td.calc');
+  calc[0].innerHTML = ret; calc[1].innerHTML = est;
+}
+function marcar(f) { if (f.id) f.estado = 'sucio'; else f.estado = 'nuevo'; }
+function foco(r, c) { const i = tbody.querySelector(`input[data-r="${r}"][data-c="${c}"]`); if (i) { i.focus(); i.select(); } }
+
+tbody.addEventListener('input', (e) => {
+  const i = e.target; if (!i.dataset.c) return;
+  const r = +i.dataset.r; const f = filas[r];
+  f.d[COLS[+i.dataset.c].k] = i.value; marcar(f); refrescarFila(r); setEstado('Cambios sin guardar');
+});
+tbody.addEventListener('focusout', (e) => {
+  const i = e.target; if (!i.dataset.c || COLS[+i.dataset.c].t !== 'hora' || !i.value) return;
+  const n = normHora(i.value); if (n !== i.value) { i.value = n; filas[+i.dataset.r].d[COLS[+i.dataset.c].k] = n; refrescarFila(+i.dataset.r); }
+});
+tbody.addEventListener('keydown', (e) => {
+  const i = e.target; if (!i.dataset.c) return;
+  const r = +i.dataset.r, c = +i.dataset.c;
+  if (e.key === 'Enter' || (e.key === 'ArrowDown' && !i.list)) {
+    e.preventDefault();
+    if (r === filas.length - 1) { if (e.key !== 'Enter') return; filas.push(nuevaFila()); render(); }
+    foco(r + 1, c);
+  } else if (e.key === 'ArrowUp' && !i.list && r > 0) { e.preventDefault(); foco(r - 1, c); }
+});
+tbody.addEventListener('paste', (e) => {
+  const i = e.target; if (!i.dataset.c) return;
+  const txt = e.clipboardData.getData('text/plain');
+  if (!/[\t\n]/.test(txt.replace(/\r?\n$/, ''))) return;
+  e.preventDefault();
+  pegarMatriz(parseTSV(txt), +i.dataset.r, +i.dataset.c);
+});
+tbody.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-del]'); if (!b) return;
+  const r = +b.dataset.del; const f = filas[r];
+  if (f.id) {
+    if (!confirm(`¿Eliminar el viaje ${f.d.ruta || ''} ${f.d.unidad_asignada || ''}? Esta acción no se puede deshacer.`)) return;
+    const res = await fetch('/api/viajes/' + f.id, { method: 'DELETE' });
+    if (!res.ok) return setEstado('No se pudo eliminar: ' + ((await res.json().catch(() => ({}))).error || res.status), 'err');
+    setEstado('Viaje eliminado', 'ok');
+  }
+  filas.splice(r, 1); if (!filas.length) filas.push(nuevaFila()); render();
+});
+
+function parseTSV(txt) {
+  return txt.replace(/\r/g, '').replace(/\n+$/, '').split('\n').map((l) => l.split('\t'));
+}
+function valorCol(c, v) { v = String(v ?? '').trim(); return c.t === 'hora' && v ? normHora(v) : v; }
+function pegarMatriz(mat, r0, c0) {
+  mat.forEach((linea, i) => {
+    const r = r0 + i; while (filas.length <= r) filas.push(nuevaFila());
+    const f = filas[r];
+    linea.forEach((v, j) => { const c = COLS[c0 + j]; if (c) f.d[c.k] = valorCol(c, v); });
+    marcar(f);
+  });
+  render(); setEstado(`${mat.length} fila(s) pegadas · sin guardar`); foco(r0, c0);
+}
+function pegarConEncabezados(mat) {
+  const head = mat[0].map(sinAcentos);
+  const mapa = head.map((h) => { for (const [k, al] of Object.entries(ALIAS)) if (al.includes(h)) return COLS.find((c) => c.k === k); return null; });
+  const reconocidas = mapa.filter(Boolean).length;
+  let datos = mat, cols = COLS;
+  if (reconocidas >= 2) { datos = mat.slice(1); cols = mapa; }
+  filas = filas.filter((f) => !(f.estado === 'nuevo' && vacia(f)));
+  datos.forEach((linea) => {
+    const f = nuevaFila();
+    linea.forEach((v, j) => { const c = cols[j]; if (c) f.d[c.k] = valorCol(c, v); });
+    if (!vacia(f)) filas.push(f);
+  });
+  filas.push(nuevaFila()); render();
+  setEstado(`${datos.length} fila(s) agregadas${reconocidas >= 2 ? ' por encabezado' : ''} · sin guardar`);
+}
+
+async function cargar() {
+  const fecha = $('#fecha').value;
+  $('#fechaLarga').textContent = fechaLarga(fecha);
+  $('#linkDash').href = '/dashboard?fecha=' + fecha;
+  history.replaceState(null, '', '?fecha=' + fecha);
+  setEstado('Cargando…');
+  const res = await fetch('/api/viajes?fecha=' + fecha);
+  if (res.status === 401) return location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+  const data = await res.json();
+  if (!res.ok) return setEstado(data.error || 'Error al cargar', 'err');
+  config = data.config;
+  filas = data.viajes.map((v) => {
+    const d = {}; COLS.forEach((c) => { d[c.k] = v[c.k] == null ? '' : String(v[c.k]); });
+    return { id: v.id, d, estado: 'ok', err: '' };
+  });
+  filas.push(nuevaFila()); render();
+  setEstado(`${data.viajes.length} viaje(s) registrados`);
+}
+
+async function guardar() {
+  const fecha = $('#fecha').value;
+  const nuevos = filas.filter((f) => !f.id && !vacia(f) && (f.estado === 'nuevo' || f.estado === 'error'));
+  const editados = filas.filter((f) => f.id && (f.estado === 'sucio' || f.estado === 'error'));
+  if (!nuevos.length && !editados.length) return setEstado('No hay cambios por guardar');
+  $('#btnGuardar').disabled = true; setEstado('Guardando…');
+  let fallas = 0;
+  filas.forEach((f) => { f.err = ''; });
+
+  if (nuevos.length) {
+    const res = await fetch('/api/viajes', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fecha, filas: nuevos.map((f) => f.d) }) });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok) data.ids.forEach((id, i) => { nuevos[i].id = id; nuevos[i].estado = 'ok'; });
+    else {
+      fallas += nuevos.length;
+      (data.detalle || []).forEach((d) => { nuevos[d.fila].estado = 'error'; nuevos[d.fila].err = d.errores.join(' · '); });
+      if (!data.detalle) nuevos.forEach((f) => { f.estado = 'error'; f.err = data.error || 'Error al guardar'; });
+    }
+  }
+  await Promise.all(editados.map(async (f) => {
+    const res = await fetch('/api/viajes/' + f.id, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(f.d) });
+    if (res.ok) f.estado = 'ok';
+    else { fallas++; f.estado = 'error'; f.err = (await res.json().catch(() => ({}))).error || 'Error al guardar'; }
+  }));
+  $('#btnGuardar').disabled = false;
+  if (fallas) { render(); setEstado(`${fallas} fila(s) con error: corrige lo marcado en rojo y vuelve a guardar`, 'err'); }
+  else { await cargar(); setEstado('Cambios guardados', 'ok'); }
+}
+
+function fechaLarga(f) {
+  const s = new Date(f + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+$('#btnAgregar').onclick = () => { filas.push(nuevaFila()); render(); foco(filas.length - 1, 0); };
+$('#btnGuardar').onclick = guardar;
+$('#btnPegar').onclick = () => { $('#txtPegar').value = ''; $('#dlg').showModal(); };
+$('#dlgCancelar').onclick = () => $('#dlg').close();
+$('#dlgAplicar').onclick = () => {
+  const t = $('#txtPegar').value; if (!t.trim()) return;
+  pegarConEncabezados(parseTSV(t)); $('#dlg').close();
+};
+let fechaPrev;
+$('#fecha').addEventListener('focus', () => { fechaPrev = $('#fecha').value; });
+$('#fecha').addEventListener('change', () => {
+  if (pendientes() && !confirm('Tienes cambios sin guardar en esta fecha. ¿Cambiar de fecha y descartarlos?')) { $('#fecha').value = fechaPrev; return; }
+  cargar();
+});
+document.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); guardar(); } });
+window.addEventListener('beforeunload', (e) => { if (pendientes()) { e.preventDefault(); e.returnValue = ''; } });
+
+$('#fecha').value = new URLSearchParams(location.search).get('fecha') || hoyLocal();
+renderHead(); cargar();
+</script>
+</body>
+</html>

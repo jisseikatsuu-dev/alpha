@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dashboard · Control de viajes</title>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <span class="eyebrow" id="eyebrow">Control de viajes · en vivo</span>
+      <h1>Tablero de operación</h1>
+    </div>
+    <div class="date-block">
+      <strong id="fechaLarga">—</strong><br>
+      <span id="actualizado">Cargando…</span>
+      <div class="controls no-print">
+        <input type="date" id="fecha" aria-label="Fecha">
+        <button id="btnImprimir">Imprimir</button>
+        <a class="btn" id="linkCaptura" href="/captura" hidden>Capturar datos</a>
+      </div>
+    </div>
+  </header>
+
+  <div class="stats" id="kpis"></div>
+  <div class="dist" id="dist"></div>
+
+  <div class="grid2">
+    <div class="section">
+      <div class="section-head"><h2>Alertas</h2><span class="count-pill" id="nAlertas">0</span></div>
+      <div id="alertas"></div>
+    </div>
+    <div class="section">
+      <div class="section-head"><h2>Por cliente</h2><span class="count-pill" id="nClientes">0</span></div>
+      <div id="clientes"></div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-head"><h2>Viajes del día</h2><span class="count-pill" id="nViajes">0</span></div>
+    <div class="tabla-wrap"><table id="tabla"></table></div>
+  </div>
+</div>
+
+<script>
+const ETIQ = { a_tiempo: 'A tiempo', retraso: 'Retraso', critico: 'Crítico', en_ruta: 'En ruta', pendiente: 'Pendiente' };
+const ORDEN = ['a_tiempo', 'retraso', 'critico', 'en_ruta', 'pendiente'];
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = (n) => String(n).padStart(2, '0');
+let timer;
+
+function fechaLarga(f) {
+  const s = new Date(f + 'T12:00:00').toLocaleDateString('es-MX', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+function barra(c, cls = '') {
+  if (!c.total) return `<div class="bar ${cls}"></div>`;
+  return `<div class="bar ${cls}" role="img" aria-label="${ORDEN.map((k) => `${ETIQ[k]} ${c[k]}`).join(', ')}">` +
+    ORDEN.filter((k) => c[k]).map((k) => `<span class="c-${k}" style="width:${(c[k] / c.total) * 100}%"></span>`).join('') + '</div>';
+}
+function tono(p) { return p == null ? '' : p >= 90 ? 'ok' : p >= 75 ? 'warn' : 'crit'; }
+
+function pintar(d) {
+  const k = d.kpis;
+  const llegados = k.a_tiempo + k.retraso + k.critico;
+  $('#fechaLarga').textContent = fechaLarga(d.fecha);
+  $('#eyebrow').textContent = d.fecha === d.hoy ? 'Control de viajes · en vivo' : 'Control de viajes · histórico';
+  const t = new Date(d.generado);
+  $('#actualizado').textContent = `Actualizado ${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}`;
+  $('#linkCaptura').hidden = !d.puedeEditar;
+  $('#linkCaptura').href = '/captura?fecha=' + d.fecha;
+
+  $('#kpis').innerHTML = [
+    { cls: tono(k.puntualidad), n: k.puntualidad == null ? '—' : k.puntualidad + '%', label: 'Puntualidad de llegada', sub: `${k.a_tiempo} de ${llegados} llegadas · tolerancia ${d.config.tolerancia} min` },
+    { cls: 'info', n: pad(k.total), label: 'Viajes programados', sub: `${llegados} completados` },
+    { cls: k.retraso + k.critico ? 'crit' : 'ok', n: pad(k.retraso + k.critico), label: 'Llegadas con retraso', sub: `${k.critico} críticas (> ${d.config.critico} min)` },
+    { cls: k.pendiente ? 'warn' : 'ok', n: pad(k.en_ruta + k.pendiente), label: 'En curso', sub: `${k.en_ruta} en ruta · ${k.pendiente} sin encender` },
+    { cls: '', n: k.ocupacion == null ? pad(k.pasajeros) : k.ocupacion + '%', label: k.ocupacion == null ? 'Pasajeros' : 'Ocupación', sub: `${k.pasajeros} pasajeros` },
+  ].map((s) => `<div class="stat ${s.cls}"><div class="n">${s.n}</div><div class="label">${s.label}</div><div class="sub">${esc(s.sub)}</div></div>`).join('');
+
+  $('#dist').innerHTML = barra(k) + '<div class="legend">' + ORDEN.map((s) => `<span><i class="c-${s}"></i>${ETIQ[s]} ${k[s]}</span>`).join('') + '</div>';
+
+  $('#nAlertas').textContent = d.alertas.length;
+  $('#alertas').innerHTML = d.alertas.length
+    ? d.alertas.map((a) => `<div class="item ${a.nivel}"><span class="tag">${a.nivel === 'crit' ? 'Crítico' : 'Atención'}</span>
+        <div class="body"><div class="title">${esc(a.titulo)}</div><div class="meta">${esc(a.detalle)}</div></div>
+        <div class="when">${esc(a.cuando)}</div></div>`).join('')
+    : `<div class="item fyi"><span class="tag">OK</span><div class="body"><div class="title">${k.total ? 'Sin alertas' : 'Sin viajes registrados para esta fecha'}</div>
+        <div class="meta">${k.total ? 'Todas las unidades van en tiempo.' : 'Los viajes aparecen aquí en cuanto se capturan.'}</div></div></div>`;
+
+  $('#nClientes').textContent = d.porCliente.length;
+  $('#clientes').innerHTML = d.porCliente.length
+    ? d.porCliente.map((c) => `<div class="cliente-row"><div class="nombre">${esc(c.cliente)}</div>
+        <div class="nums mono">${c.total} viajes · ${c.puntualidad == null ? '—' : c.puntualidad + '% puntual'}${c.ocupacion == null ? '' : ' · ' + c.ocupacion + '% ocup.'}</div>
+        ${barra(c, 'sm')}</div>`).join('')
+    : '<div class="vacio">Sin datos</div>';
+
+  $('#nViajes').textContent = d.viajes.length;
+  const ret = (m) => m == null ? '—' : `<span class="${m > d.config.tolerancia ? 'tarde' : m < 0 ? 'temprano' : ''}">${m > 0 ? '+' : ''}${m}</span>`;
+  $('#tabla').innerHTML = d.viajes.length
+    ? '<thead><tr><th>Cliente</th><th>Turno</th><th>Ruta</th><th>Unidad</th><th>Operador</th><th>Inicio prog.</th><th>Encendido</th><th>Salida ±</th><th>Llegada prog.</th><th>Llegada real</th><th>Llegada ±</th><th>Pax</th><th>Estatus</th></tr></thead><tbody>' +
+      d.viajes.map((v) => `<tr><td>${esc(v.cliente)}</td><td>${esc(v.turno)}</td><td><strong>${esc(v.ruta)}</strong></td><td class="mono">${esc(v.unidad_asignada) || '—'}</td>
+        <td>${esc(v.operador)}</td><td class="mono">${v.inicio_ruta || '—'}</td><td class="mono">${v.hora_encendido_real || '—'}</td><td class="num">${ret(v.retraso_salida)}</td>
+        <td class="mono">${v.llegada_programada || '—'}</td><td class="mono">${v.hora_llegada_real || '—'}</td><td class="num">${ret(v.retraso_llegada)}</td>
+        <td class="num">${v.pasajeros ?? '—'}${v.capacidad ? '/' + v.capacidad : ''}</td><td><span class="pill ${v.estatus}">${ETIQ[v.estatus]}</span></td></tr>`).join('') + '</tbody>'
+    : '<tbody><tr><td class="vacio">Sin viajes para esta fecha</td></tr></tbody>';
+}
+
+let sigueHoy = !new URLSearchParams(location.search).get('fecha');
+async function cargar() {
+  const fecha = sigueHoy ? '' : $('#fecha').value;
+  history.replaceState(null, '', fecha ? '?fecha=' + fecha : location.pathname);
+  try {
+    const res = await fetch('/api/dashboard' + (fecha ? '?fecha=' + fecha : ''));
+    if (res.status === 401) return location.href = '/login?next=' + encodeURIComponent(location.pathname + location.search);
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.error || res.status);
+    if (sigueHoy) $('#fecha').value = d.fecha;
+    pintar(d);
+  } catch (e) {
+    $('#actualizado').textContent = 'Sin conexión con el servidor — reintentando';
+  }
+  clearTimeout(timer);
+  timer = setTimeout(cargar, 30000);
+}
+
+$('#fecha').value = new URLSearchParams(location.search).get('fecha') || '';
+$('#fecha').addEventListener('change', () => { sigueHoy = false; cargar(); });
+$('#btnImprimir').onclick = () => window.print();
+cargar();
+</script>
+</body>
+</html>

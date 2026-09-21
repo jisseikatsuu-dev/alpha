@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Iniciar sesión · Control de viajes</title>
+<link href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+<form class="login" method="post" id="f">
+  <span class="eyebrow">Control de viajes</span>
+  <h1>Iniciar sesión</h1>
+  <label for="u">Usuario</label>
+  <input type="text" id="u" name="usuario" autocomplete="username" required autofocus>
+  <label for="p">Contraseña</label>
+  <input type="password" id="p" name="password" autocomplete="current-password" required>
+  <button class="primary" type="submit">Entrar</button>
+  <div class="error" id="err" hidden>Usuario o contraseña incorrectos.</div>
+</form>
+<script>
+  const q = new URLSearchParams(location.search);
+  document.getElementById('f').action = '/login?next=' + encodeURIComponent(q.get('next') || '/captura');
+  if (q.get('error')) document.getElementById('err').hidden = false;
+</script>
+</body>
+</html>
